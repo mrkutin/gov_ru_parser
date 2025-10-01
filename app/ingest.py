@@ -7,9 +7,9 @@ from loguru import logger
 
 from .parser import iterate_page_paragraphs
 from qdrant_client import QdrantClient
-from langchain_qdrant import QdrantVectorStore
+from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
 from langchain_huggingface import HuggingFaceEmbeddings
-from qdrant_client.http.models import VectorParams, Distance
+from qdrant_client.http.models import VectorParams, Distance, SparseVectorParams
 
 
 def ingest_document_to_qdrant(
@@ -40,6 +40,7 @@ def ingest_document_to_qdrant(
 
     # 1) Initialize embeddings and Qdrant (LangChain vector store)
     dense_embeddings = HuggingFaceEmbeddings(model_name=embedding_model)
+    sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
     collection_name = f"{collection_prefix}{doc_id}"
 
     # Create Qdrant client
@@ -57,7 +58,12 @@ def ingest_document_to_qdrant(
             dim = 768
         client.create_collection(
             collection_name=collection_name,
-            vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+            vectors_config={
+                "dense": VectorParams(size=dim, distance=Distance.COSINE),
+            },
+            sparse_vectors_config={
+                "sparse": SparseVectorParams(),
+            },
         )
 
     # Recreate collection if requested, otherwise ensure it exists
@@ -73,8 +79,16 @@ def ingest_document_to_qdrant(
         except Exception:
             _create_collection_if_needed()
 
-    # Vector store instance
-    vector_store = QdrantVectorStore(client=client, collection_name=collection_name, embedding=dense_embeddings)
+    # Vector store instance (HYBRID mode with named vectors)
+    vector_store = QdrantVectorStore(
+        client=client,
+        collection_name=collection_name,
+        embedding=dense_embeddings,
+        sparse_embedding=sparse_embeddings,
+        retrieval_mode=RetrievalMode.HYBRID,
+        vector_name="dense",
+        sparse_vector_name="sparse",
+    )
 
     # 2) Stream per page: group and upload incrementally
     start_index = 0
