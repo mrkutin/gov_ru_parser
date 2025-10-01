@@ -52,12 +52,11 @@ def iterate_page_paragraphs(
     start_url: str,
     max_pages: Optional[int] = None,
     next_selector: Optional[str] = None,
-    next_text: str = "Следующая",
     headless: bool = True,
     slow_mo_ms: int = 0,
     user_agent: Optional[str] = None,
     navigation_timeout_ms: int = 15000,
-    content_selector: str = ".reader_article_body",
+    content_selector: str = None,
     # Human-like behavior tuning
     humanize: bool = True,
     dwell_min_s: float = 0.8,
@@ -124,26 +123,6 @@ def iterate_page_paragraphs(
         previous_fingerprint: Optional[str] = None
         page_count = 0
 
-        def find_next(p: Page):
-            if next_selector:
-                return p.locator(next_selector).first
-            locs = [
-                p.locator("a[rel=next]").first,
-                p.get_by_role("button", name=next_text).first,
-                p.get_by_role("link", name=next_text).first,
-                p.locator(f"text=^{next_text}$").first,
-                p.locator(f"text={next_text}").first,
-                p.get_by_role("button", name="Next").first,
-                p.get_by_role("link", name="Next").first,
-            ]
-            for l in locs:
-                try:
-                    if l and l.is_visible():
-                        return l
-                except Exception:
-                    continue
-            return None
-
         while True:
             page_count += 1
             logger.info(f"Текущая страница #{page_count}: {page.url}")
@@ -173,7 +152,7 @@ def iterate_page_paragraphs(
                 logger.info("Достигнут предел max_pages — завершаю.")
                 break
 
-            next_btn = find_next(page)
+            next_btn = _find_next_button(page, selector=next_selector)
             if not next_btn:
                 logger.info("Кнопка/ссылка 'Следующая' не найдена — завершаю.")
                 break
@@ -246,52 +225,21 @@ def _get_page_fingerprint(page: Page) -> str:
 
 def _find_next_button(
     page: Page,
-    next_text: str = "Следующая",
-    custom_selector: Optional[str] = None,
+    selector: Optional[str] = None,
 ):
-    """Try multiple strategies to find a visible "Next"/"Следующая" control.
+    """Find the next control using only the provided CSS selector.
 
-    The search order is:
-    1) Custom CSS selector (if provided)
-    2) <a rel="next">
-    3) Accessible role-based matches for button/link by given text
-    4) Text-based locators for exact and partial matches
-    5) English fallbacks ("Next")
-    6) ARIA/data-testid heuristics
+    Returns the first visible element matching selector, or None if not found
+    or if no selector was provided.
     """
-    candidates = []
-
-    # 1) Explicit selector takes precedence
-    if custom_selector:
-        candidates.append(page.locator(custom_selector))
-
-    # 2) rel=next semantic link
-    candidates.append(page.locator("a[rel=next]"))
-
-    # 3) Role-based queries are resilient and prefer visible elements
-    candidates.append(page.get_by_role("button", name=next_text))
-    candidates.append(page.get_by_role("link", name=next_text))
-
-    # 4) Text locators (exact, then partial)
-    candidates.append(page.locator(f"text=^{next_text}$"))
-    candidates.append(page.locator(f"text={next_text}"))
-
-    # 5) English fallbacks
-    candidates.append(page.get_by_role("button", name="Next"))
-    candidates.append(page.get_by_role("link", name="Next"))
-
-    # 6) ARIA and test id heuristics
-    candidates.append(page.locator("[aria-label*=Next i], [aria-label*=Следующая i]"))
-    candidates.append(page.locator("[data-testid*=next i]"))
-
-    for locator in candidates:
-        try:
-            element = locator.first
-            if element and element.is_visible():
-                return element
-        except Exception:
-            # Some locators may throw in specific contexts; ignore and continue
-            continue
+    if not selector:
+        return None
+    try:
+        element = page.locator(selector).first
+        if element and element.is_visible():
+            return element
+    except Exception:
+        return None
     return None
 
 
@@ -400,7 +348,6 @@ def paginate_until_end(
     start_url: str,
     max_pages: Optional[int] = None,
     next_selector: Optional[str] = None,
-    next_text: str = "Следующая",
     headless: bool = False,
     slow_mo_ms: int = 0,
     user_agent: Optional[str] = None,
@@ -499,7 +446,7 @@ def paginate_until_end(
                 break
 
             next_button = _find_next_button(
-                page, next_text=next_text, custom_selector=next_selector
+                page, selector=next_selector
             )
             if not next_button:
                 logger.info("Кнопка/ссылка 'Следующая' не найдена — завершаю.")

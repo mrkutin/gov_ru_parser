@@ -15,10 +15,8 @@ from qdrant_client.http.models import VectorParams, Distance, SparseVectorParams
 def ingest_document_to_qdrant(
     doc_id: str,
     start_url: str,
-    collection_prefix: str = "docs_",
     recreate: bool = True,
-    next_selector: Optional[str] = None,
-    next_text: str = "Показать еще",
+    next_selector: Optional[str] = ".show-more",
     headless: bool = False,
     max_pages: Optional[int] = None,
     content_selector: str = ".reader_article_body",
@@ -28,9 +26,6 @@ def ingest_document_to_qdrant(
     qdrant_url: Optional[str] = None,
     qdrant_host: Optional[str] = None,
     qdrant_port: Optional[int] = None,
-    # qdrant_grpc_port: Optional[int] = None,
-    qdrant_api_key: Optional[str] = None,
-    embedding_model: str = "ai-forever/FRIDA",
 ) -> None:
     """Parse a document by pages, split to paragraphs and store chunks in a dedicated Qdrant collection.
 
@@ -39,15 +34,15 @@ def ingest_document_to_qdrant(
     """
 
     # 1) Initialize embeddings and Qdrant (LangChain vector store)
-    dense_embeddings = HuggingFaceEmbeddings(model_name=embedding_model)
+    dense_embeddings = HuggingFaceEmbeddings(model_name="ai-forever/FRIDA")
     sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
-    collection_name = f"{collection_prefix}{doc_id}"
+    collection_name = f"{doc_id}"
 
     # Create Qdrant client
     if qdrant_url:
-        client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, prefer_grpc=True)
+        client = QdrantClient(url=qdrant_url, prefer_grpc=True)
     elif qdrant_host:
-        client = QdrantClient(host=qdrant_host, port=qdrant_port or 6333, api_key=qdrant_api_key, prefer_grpc=True)
+        client = QdrantClient(host=qdrant_host, port=qdrant_port or 6333, prefer_grpc=True)
     else:
         client = QdrantClient(path=":memory:")
 
@@ -98,7 +93,6 @@ def ingest_document_to_qdrant(
         start_url=start_url,
         max_pages=max_pages,
         next_selector=next_selector,
-        next_text=next_text,
         headless=headless,
         content_selector=content_selector,
     ):
@@ -116,13 +110,8 @@ def ingest_document_to_qdrant(
         metadatas = []
         ids = []
         for idx in range(len(page_chunks)):
-            base = {
-                "doc_id": doc_id,
-                "chunk_index": start_index + idx,
-            }
             extra = page_payloads[idx] if page_payloads and idx < len(page_payloads) else {}
-            base.update(extra)
-            metadatas.append(base)
+            metadatas.append(extra)
             ids.append(start_index + idx)
 
         vector_store.add_texts(texts=page_chunks, metadatas=metadatas, ids=ids)
@@ -181,8 +170,7 @@ def _group_paragraphs_into_articles_with_payload(
             current_meta = {
                 "article_number": article_number,
                 "article_title": article_title,
-                **last_chapter_meta,
-                "type": "article",
+                **last_chapter_meta
             }
         else:
             if current:
