@@ -6,9 +6,10 @@ import re
 from loguru import logger
 
 from .parser import paginate_extract_paragraphs, iterate_page_paragraphs
-from .embeddings import EmbeddingService
-from .qdrant_store import QdrantStore
-from qdrant_client.http.models import Distance
+from qdrant_client import QdrantClient
+from langchain_qdrant import QdrantVectorStore
+from langchain_huggingface import HuggingFaceEmbeddings
+from qdrant_client.http.models import VectorParams, Distance
 
 
 def ingest_document_to_qdrant(
@@ -18,7 +19,7 @@ def ingest_document_to_qdrant(
     recreate: bool = True,
     next_selector: Optional[str] = None,
     next_text: str = "Показать еще",
-    headless: bool = True,
+    headless: bool = False,
     max_pages: Optional[int] = None,
     content_selector: str = ".reader_article_body",
     # Article chunking
@@ -37,21 +38,43 @@ def ingest_document_to_qdrant(
     If recreate=True, the previous chunks for this doc are removed (by payload filter) before upsert.
     """
 
-    # 1) Initialize embeddings and Qdrant
-    embedder = EmbeddingService(model_name=embedding_model)
-    store = QdrantStore(
-        url=qdrant_url,
-        host=qdrant_host,
-        port=qdrant_port,
-        api_key=qdrant_api_key,
-        prefer_grpc=True,
-        # grpc_port=qdrant_grpc_port,
-    )
+    # 1) Initialize embeddings and Qdrant (LangChain vector store)
+    dense_embeddings = HuggingFaceEmbeddings(model_name=embedding_model)
     collection_name = f"{collection_prefix}{doc_id}"
-    if recreate:
-        store.recreate_collection(collection_name, vector_size=embedder.dimension, distance=Distance.COSINE)
+
+    # Create Qdrant client
+    if qdrant_url:
+        client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, prefer_grpc=True)
+    elif qdrant_host:
+        client = QdrantClient(host=qdrant_host, port=qdrant_port or 6333, api_key=qdrant_api_key, prefer_grpc=True)
     else:
-        store.ensure_collection(collection_name, vector_size=embedder.dimension, distance=Distance.COSINE)
+        client = QdrantClient(path=":memory:")
+
+    def _create_collection_if_needed() -> None:
+        try:
+            dim = len(dense_embeddings.embed_query("test"))
+        except Exception:
+            dim = 768
+        client.create_collection(
+            collection_name=collection_name,
+            vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+        )
+
+    # Recreate collection if requested, otherwise ensure it exists
+    if recreate:
+        try:
+            client.delete_collection(collection_name=collection_name)
+        except Exception:
+            pass
+        _create_collection_if_needed()
+    else:
+        try:
+            _ = client.get_collection(collection_name=collection_name)
+        except Exception:
+            _create_collection_if_needed()
+
+    # Vector store instance
+    vector_store = QdrantVectorStore(client=client, collection_name=collection_name, embedding=dense_embeddings)
 
     # 2) Stream per page: group and upload incrementally
     start_index = 0
@@ -76,15 +99,19 @@ def ingest_document_to_qdrant(
             page_chunks = ["\n\n".join(page_paras)]
             page_payloads = [{}]
 
-        vectors = embedder.embed(page_chunks)
-        store.upsert_chunks(
-            collection_name,
-            doc_id,
-            page_chunks,
-            vectors,
-            extra_payload=page_payloads,
-            start_index=start_index,
-        )
+        metadatas = []
+        ids = []
+        for idx in range(len(page_chunks)):
+            base = {
+                "doc_id": doc_id,
+                "chunk_index": start_index + idx,
+            }
+            extra = page_payloads[idx] if page_payloads and idx < len(page_payloads) else {}
+            base.update(extra)
+            metadatas.append(base)
+            ids.append(start_index + idx)
+
+        vector_store.add_texts(texts=page_chunks, metadatas=metadatas, ids=ids)
         start_index += len(page_chunks)
         any_uploaded = True
 
