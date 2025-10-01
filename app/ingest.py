@@ -5,7 +5,7 @@ import re
 
 from loguru import logger
 
-from .parser import paginate_extract_paragraphs, iterate_page_paragraphs
+from .parser import iterate_page_paragraphs
 from qdrant_client import QdrantClient
 from langchain_qdrant import QdrantVectorStore
 from langchain_huggingface import HuggingFaceEmbeddings
