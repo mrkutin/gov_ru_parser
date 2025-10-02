@@ -10,6 +10,7 @@ def main() -> None:
     parser.add_argument("doc_id", help="Unique document id for collection naming and payload")
     parser.add_argument("start_url", help="Start URL")
     parser.add_argument("--next-selector", type=str, default=".show-more")
+    parser.add_argument("--next-text", type=str, default="Следующая")
     parser.add_argument("--content-selector", type=str, default=".reader_article_body")
 
     parser.add_argument("--max-pages", type=int, default=None)
@@ -36,6 +37,7 @@ def main() -> None:
         start_url=args.start_url,
         recreate=not args.no_recreate,
         next_selector=args.next_selector,
+        next_text=args.next_text,
         headless=args.headless,
         max_pages=args.max_pages,
         content_selector=args.content_selector,

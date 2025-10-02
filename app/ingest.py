@@ -5,7 +5,7 @@ import re
 
 from loguru import logger
 
-from .parser import iterate_page_paragraphs
+from .parser import iterate_page_paragraphs, _trim_cross_page_overlap, _should_merge_cross_page
 from qdrant_client import QdrantClient
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -17,9 +17,10 @@ def ingest_document_to_qdrant(
     start_url: str,
     recreate: bool = True,
     next_selector: Optional[str] = ".show-more",
+    next_text: Optional[str] = "Следующая",
+    content_selector: str = ".reader_article_body",
     headless: bool = False,
     max_pages: Optional[int] = None,
-    content_selector: str = ".reader_article_body",
     # Article chunking
     article_regex: Optional[str] = r"^Статья\s+\d+[\.|\-]?",
     disable_article_grouping: bool = False,
@@ -85,38 +86,228 @@ def ingest_document_to_qdrant(
         sparse_vector_name="sparse",
     )
 
-    # 2) Stream per page: group and upload incrementally
+    # 2) Stream per page with cross-page seam merge
     start_index = 0
     compiled = re.compile(article_regex) if (not disable_article_grouping and article_regex) else None
     any_uploaded = False
+    prev_paras: List[str] | None = None
+    # Cross-page article aggregator state (when grouping enabled)
+    chapter_pat = re.compile(r"^Глава\s+(\d+)[\.:\-]?\s*(.*)$", re.IGNORECASE)
+    article_num_pat = re.compile(r"^Статья\s+(\d+)[\.|\-]?\s*(.*)$", re.IGNORECASE)
+    last_chapter_meta: dict = {}
+    current_article_paras: List[str] = []
+    current_article_meta: dict | None = None
+
     for page_paras in iterate_page_paragraphs(
         start_url=start_url,
         max_pages=max_pages,
         next_selector=next_selector,
+        next_text=next_text,
         headless=headless,
         content_selector=content_selector,
     ):
         if not page_paras:
             continue
-        if compiled is not None:
-            page_chunks, page_payloads = _group_paragraphs_into_articles_with_payload(page_paras, compiled)
-            if not page_chunks:
-                page_chunks = ["\n\n".join(page_paras)]
+
+        if prev_paras is None:
+            prev_paras = list(page_paras)
+            continue
+
+        # Merge seam between prev_paras tail and current head
+        if prev_paras and page_paras:
+            trimmed_head = _trim_cross_page_overlap(prev_paras[-1], page_paras[0])
+            if _should_merge_cross_page(prev_paras[-1], trimmed_head):
+                if prev_paras[-1].endswith("-"):
+                    prev_paras[-1] = prev_paras[-1][:-1] + trimmed_head.lstrip()
+                else:
+                    tail = prev_paras[-1].rstrip()
+                    head = trimmed_head.lstrip()
+                    if tail and head and tail[-1].isalpha() and head[0].isalpha():
+                        prev_paras[-1] = tail + head
+                    else:
+                        prev_paras[-1] = tail + " " + head
+                page_paras = page_paras[1:]
+            else:
+                page_paras[0] = trimmed_head
+                if not page_paras[0].strip():
+                    page_paras = page_paras[1:]
+
+        # Upsert finalized articles/chunks from previous page
+        if prev_paras:
+            if compiled is not None:
+                # Stream paragraphs through the cross-page aggregator
+                finished_chunks: List[str] = []
+                finished_payloads: List[dict] = []
+                for para in prev_paras:
+                    ch_m = chapter_pat.match(para)
+                    if ch_m:
+                        # Update chapter context for subsequent articles
+                        last_chapter_meta = {
+                            "chapter_number": ch_m.group(1),
+                            "chapter_title": (ch_m.group(2).strip() if ch_m.group(2) else ""),
+                        }
+                        continue
+                    if compiled.match(para):
+                        # Flush previous article if exists
+                        if current_article_paras:
+                            finished_chunks.append("\n\n".join(current_article_paras))
+                            finished_payloads.append(current_article_meta or {})
+                            current_article_paras = []
+                            current_article_meta = None
+                        # Start new article
+                        current_article_paras = [para]
+                        a_m = article_num_pat.match(para)
+                        article_number = a_m.group(1) if a_m else ""
+                        article_title = (a_m.group(2).strip() if a_m and a_m.group(2) else "")
+                        current_article_meta = {
+                            "article_number": article_number,
+                            "article_title": article_title,
+                            **last_chapter_meta,
+                        }
+                    else:
+                        if current_article_paras:
+                            current_article_paras.append(para)
+                        else:
+                            # Skip preface before the first article
+                            continue
+
+                # Upsert any finished chunks from this page
+                if finished_chunks:
+                    # Deduplicate by article identity; keep the longest text per key
+                    dedup_map: dict[tuple, tuple[str, dict]] = {}
+                    order: List[tuple] = []
+                    for idx in range(len(finished_chunks)):
+                        text = finished_chunks[idx]
+                        meta = finished_payloads[idx] if idx < len(finished_payloads) else {}
+                        key = (
+                            meta.get("chapter_number"),
+                            meta.get("chapter_title"),
+                            meta.get("article_number"),
+                            meta.get("article_title"),
+                        )
+                        if key not in dedup_map:
+                            dedup_map[key] = (text, meta)
+                            order.append(key)
+                        else:
+                            if len(text) > len(dedup_map[key][0]):
+                                dedup_map[key] = (text, meta)
+                    texts_out: List[str] = []
+                    metas_out: List[dict] = []
+                    for key in order:
+                        t, m = dedup_map[key]
+                        texts_out.append(t)
+                        metas_out.append(m)
+                    metadatas: List[dict] = []
+                    ids: List[int] = []
+                    for idx in range(len(texts_out)):
+                        metadatas.append(metas_out[idx])
+                        ids.append(start_index + idx)
+                    vector_store.add_texts(texts=texts_out, metadatas=metadatas, ids=ids)
+                    start_index += len(texts_out)
+                    any_uploaded = True
+            else:
+                # Grouping disabled: upsert whole page as a single chunk
+                page_chunks = ["\n\n".join(prev_paras)]
                 page_payloads = [{}]
+                metadatas: List[dict] = []
+                ids: List[int] = []
+                for idx in range(len(page_chunks)):
+                    extra = page_payloads[idx] if page_payloads and idx < len(page_payloads) else {}
+                    metadatas.append(extra)
+                    ids.append(start_index + idx)
+                vector_store.add_texts(texts=page_chunks, metadatas=metadatas, ids=ids)
+                start_index += len(page_chunks)
+                any_uploaded = True
+
+        # Move buffer to current page (post-merge)
+        prev_paras = list(page_paras)
+
+    # Flush last buffered page
+    if prev_paras:
+        if compiled is not None:
+            # Process remaining paragraphs and flush the last open article
+            finished_chunks: List[str] = []
+            finished_payloads: List[dict] = []
+            for para in prev_paras:
+                ch_m = chapter_pat.match(para)
+                if ch_m:
+                    last_chapter_meta = {
+                        "chapter_number": ch_m.group(1),
+                        "chapter_title": (ch_m.group(2).strip() if ch_m.group(2) else ""),
+                    }
+                    continue
+                if compiled.match(para):
+                    if current_article_paras:
+                        finished_chunks.append("\n\n".join(current_article_paras))
+                        finished_payloads.append(current_article_meta or {})
+                        current_article_paras = []
+                        current_article_meta = None
+                    current_article_paras = [para]
+                    a_m = article_num_pat.match(para)
+                    article_number = a_m.group(1) if a_m else ""
+                    article_title = (a_m.group(2).strip() if a_m and a_m.group(2) else "")
+                    current_article_meta = {
+                        "article_number": article_number,
+                        "article_title": article_title,
+                        **last_chapter_meta,
+                    }
+                else:
+                    if current_article_paras:
+                        current_article_paras.append(para)
+                    else:
+                        continue
+            # Flush the last open article
+            if current_article_paras:
+                finished_chunks.append("\n\n".join(current_article_paras))
+                finished_payloads.append(current_article_meta or {})
+                current_article_paras = []
+                current_article_meta = None
+
+            if finished_chunks:
+                # Deduplicate by article identity; keep the longest text per key
+                dedup_map: dict[tuple, tuple[str, dict]] = {}
+                order: List[tuple] = []
+                for idx in range(len(finished_chunks)):
+                    text = finished_chunks[idx]
+                    meta = finished_payloads[idx] if idx < len(finished_payloads) else {}
+                    key = (
+                        meta.get("chapter_number"),
+                        meta.get("chapter_title"),
+                        meta.get("article_number"),
+                        meta.get("article_title"),
+                    )
+                    if key not in dedup_map:
+                        dedup_map[key] = (text, meta)
+                        order.append(key)
+                    else:
+                        if len(text) > len(dedup_map[key][0]):
+                            dedup_map[key] = (text, meta)
+                texts_out: List[str] = []
+                metas_out: List[dict] = []
+                for key in order:
+                    t, m = dedup_map[key]
+                    texts_out.append(t)
+                    metas_out.append(m)
+                metadatas: List[dict] = []
+                ids: List[int] = []
+                for idx in range(len(texts_out)):
+                    metadatas.append(metas_out[idx])
+                    ids.append(start_index + idx)
+                vector_store.add_texts(texts=texts_out, metadatas=metadatas, ids=ids)
+                start_index += len(texts_out)
+                any_uploaded = True
         else:
-            page_chunks = ["\n\n".join(page_paras)]
+            page_chunks = ["\n\n".join(prev_paras)]
             page_payloads = [{}]
-
-        metadatas = []
-        ids = []
-        for idx in range(len(page_chunks)):
-            extra = page_payloads[idx] if page_payloads and idx < len(page_payloads) else {}
-            metadatas.append(extra)
-            ids.append(start_index + idx)
-
-        vector_store.add_texts(texts=page_chunks, metadatas=metadatas, ids=ids)
-        start_index += len(page_chunks)
-        any_uploaded = True
+            metadatas: List[dict] = []
+            ids: List[int] = []
+            for idx in range(len(page_chunks)):
+                extra = page_payloads[idx] if page_payloads and idx < len(page_payloads) else {}
+                metadatas.append(extra)
+                ids.append(start_index + idx)
+            vector_store.add_texts(texts=page_chunks, metadatas=metadatas, ids=ids)
+            start_index += len(page_chunks)
+            any_uploaded = True
 
     if not any_uploaded:
         logger.warning("Не удалось извлечь текст: пустой результат.")

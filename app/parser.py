@@ -52,6 +52,7 @@ def iterate_page_paragraphs(
     start_url: str,
     max_pages: Optional[int] = None,
     next_selector: Optional[str] = None,
+    next_text: Optional[str] = None,
     headless: bool = True,
     slow_mo_ms: int = 0,
     user_agent: Optional[str] = None,
@@ -152,7 +153,12 @@ def iterate_page_paragraphs(
                 logger.info("Достигнут предел max_pages — завершаю.")
                 break
 
-            next_btn = _find_next_button(page, selector=next_selector)
+            # Ensure the bottom area is revealed so the next control becomes available
+            try:
+                _scroll_to_bottom(page)
+            except Exception:
+                pass
+            next_btn = _find_next_button(page, selector=next_selector, link_text=next_text)
             if not next_btn:
                 logger.info("Кнопка/ссылка 'Следующая' не найдена — завершаю.")
                 break
@@ -167,6 +173,11 @@ def iterate_page_paragraphs(
                     except Exception:
                         pass
                     _human_pause(0.3, 0.8)
+                # Debug: highlight the next button in red before clicking
+                try:
+                    next_btn.evaluate("el => { el.style.outline='3px solid red'; el.style.backgroundColor='rgba(255,0,0,0.25)'; }")
+                except Exception:
+                    pass
                 with page.expect_navigation(wait_until="domcontentloaded", timeout=navigation_timeout_ms):
                     next_btn.click()
                 logger.info("Навигация выполнена — открыта следующая страница.")
@@ -212,6 +223,24 @@ def _human_read_page(
                 pass
         time.sleep(random.uniform(pause_min_s, pause_max_s))
 
+def _scroll_to_bottom(page: Page) -> None:
+    """Scroll to the bottom to reveal pagination controls located at the footer.
+
+    Best-effort; errors are ignored.
+    """
+    try:
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    except Exception:
+        try:
+            page.mouse.wheel(0, 2000)
+        except Exception:
+            pass
+    # Short dwell to allow lazy elements to appear
+    try:
+        time.sleep(0.3)
+    except Exception:
+        pass
+
 def _get_page_fingerprint(page: Page) -> str:
     """Return a stable fingerprint of the current page content.
 
@@ -226,6 +255,7 @@ def _get_page_fingerprint(page: Page) -> str:
 def _find_next_button(
     page: Page,
     selector: Optional[str] = None,
+    link_text: Optional[str] = None,
 ):
     """Find the next control using only the provided CSS selector.
 
@@ -235,7 +265,13 @@ def _find_next_button(
     if not selector:
         return None
     try:
-        element = page.locator(selector).first
+        locator = page.locator(selector)
+        # Prefer to filter by provided link_text; default to "Следующая"
+        if link_text:
+            locator = locator.filter(has_text=link_text)
+        else:
+            locator = locator.filter(has_text="Следующая")
+        element = locator.first
         if element and element.is_visible():
             return element
     except Exception:
@@ -348,6 +384,7 @@ def paginate_until_end(
     start_url: str,
     max_pages: Optional[int] = None,
     next_selector: Optional[str] = None,
+    next_text: Optional[str] = None,
     headless: bool = False,
     slow_mo_ms: int = 0,
     user_agent: Optional[str] = None,
@@ -445,9 +482,12 @@ def paginate_until_end(
                 logger.info("Достигнут предел max_pages — завершаю.")
                 break
 
-            next_button = _find_next_button(
-                page, selector=next_selector
-            )
+            # Ensure the bottom area is revealed so the next control becomes available
+            try:
+                _scroll_to_bottom(page)
+            except Exception:
+                pass
+            next_button = _find_next_button(page, selector=next_selector, link_text=next_text)
             if not next_button:
                 logger.info("Кнопка/ссылка 'Следующая' не найдена — завершаю.")
                 break
@@ -456,6 +496,11 @@ def paginate_until_end(
                 with page.expect_navigation(
                     wait_until="domcontentloaded", timeout=navigation_timeout_ms
                 ) as navigation_info:
+                    # Debug: highlight the next button in red before clicking
+                    try:
+                        next_button.evaluate("el => { el.style.outline='3px solid red'; el.style.backgroundColor='rgba(255,0,0,0.25)'; }")
+                    except Exception:
+                        pass
                     next_button.click()
                 _ = navigation_info.value
                 logger.info("Навигация выполнена — открыта следующая страница.")
