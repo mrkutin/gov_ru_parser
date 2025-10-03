@@ -2,7 +2,7 @@ playwright>=1.45.0,<2.0.0
 loguru>=0.7.2
 qdrant-client>=1.7.0
 sentence-transformers>=2.7.0
-
+fastembed>=0.6.1
 langchain>=0.2.14
 langchain-qdrant>=0.1.2
 langchain-huggingface>=0.0.3

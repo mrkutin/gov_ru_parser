@@ -70,11 +70,17 @@ def ingest_document_to_qdrant(
         except Exception:
             pass
         _create_collection_if_needed()
+        start_index = 0
     else:
         try:
             _ = client.get_collection(collection_name=collection_name)
         except Exception:
             _create_collection_if_needed()
+        # Continue IDs from current collection size to avoid overwriting points
+        try:
+            start_index = client.count(collection_name=collection_name, exact=True).count
+        except Exception:
+            start_index = 0
 
     # Vector store instance (HYBRID mode with named vectors)
     vector_store = QdrantVectorStore(
@@ -90,7 +96,6 @@ def ingest_document_to_qdrant(
     )
 
     # 2) Stream per page with cross-page seam merge
-    start_index = 0
     compiled = re.compile(article_regex) if (not disable_article_grouping and article_regex) else None
     any_uploaded = False
     prev_paras: List[str] | None = None
