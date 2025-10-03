@@ -62,3 +62,44 @@ python main.py "uk_1996" "http://government.ru/docs/all/96145/" \
 Если используется «Показать ещё» (с «ё»), укажите соответствующий текст в селекторе или используйте `--next-text "Показать ещё"`.
 
 
+
+### Docker
+
+Сборка образа:
+
+```bash
+docker build -t gov-ru-parser:latest .
+```
+
+Запуск контейнера (пример соответствует команде `python main.py gk_1994 http://government.ru/docs/all/95825/ --qdrant-url http://localhost:6333 --no-recreate`):
+
+> На macOS/Windows внутри контейнера вместо `localhost` используйте `host.docker.internal` для доступа к сервисам на хосте.
+
+```bash
+docker run --rm \
+  -e DOC_ID=gk_1994 \
+  -e START_URL=http://government.ru/docs/all/95825/ \
+  -e QDRANT_URL=http://host.docker.internal:6333 \
+  -e NO_RECREATE=1 \
+  gov-ru-parser:latest
+```
+
+Дополнительные переменные окружения (необязательно):
+
+- `NEXT_SELECTOR` (по умолчанию `.show-more`)
+- `NEXT_TEXT` (по умолчанию `Следующая`)
+- `CONTENT_SELECTOR` (по умолчанию `.reader_article_body`)
+- `HEADLESS` (`1`/`true` для включения)
+- `MAX_PAGES` (число)
+- `ARTICLE_REGEX` (регэксп заголовка статьи, чтобы включить группировку)
+- `NO_ARTICLE_GROUPING` (`1`/`true` чтобы отключить группировку по статьям)
+- `NO_RECREATE` (`1`/`true` чтобы не пересоздавать коллекцию)
+
+Docker Compose (Qdrant + приложение):
+
+```bash
+docker compose up --build
+```
+
+В `docker-compose.yml` приложение обращается к Qdrant по `http://qdrant:6333`. Чтобы задать свои параметры, используйте секцию `environment:` или флаги `-e` при запуске.
+
