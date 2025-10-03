@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import List, Optional
+from datetime import datetime, timezone
 import re
 
 from loguru import logger
@@ -84,6 +85,8 @@ def ingest_document_to_qdrant(
         retrieval_mode=RetrievalMode.HYBRID,
         vector_name="dense",
         sparse_vector_name="sparse",
+        content_payload_key="page_content",
+        metadata_payload_key="metadata",
     )
 
     # 2) Stream per page with cross-page seam merge
@@ -173,6 +176,7 @@ def ingest_document_to_qdrant(
 
                 # Upsert any finished chunks from this page
                 if finished_chunks:
+                    now_str = datetime.now().astimezone().isoformat(timespec='seconds')
                     # Deduplicate by article identity; keep the longest text per key
                     dedup_map: dict[tuple, tuple[str, dict]] = {}
                     order: List[tuple] = []
@@ -200,7 +204,7 @@ def ingest_document_to_qdrant(
                     metadatas: List[dict] = []
                     ids: List[int] = []
                     for idx in range(len(texts_out)):
-                        metadatas.append(metas_out[idx])
+                        metadatas.append({**metas_out[idx], "upload_time": now_str})
                         ids.append(start_index + idx)
                     vector_store.add_texts(texts=texts_out, metadatas=metadatas, ids=ids)
                     start_index += len(texts_out)
@@ -209,11 +213,12 @@ def ingest_document_to_qdrant(
                 # Grouping disabled: upsert whole page as a single chunk
                 page_chunks = ["\n\n".join(prev_paras)]
                 page_payloads = [{}]
+                now_str = datetime.now().astimezone().isoformat(timespec='seconds')
                 metadatas: List[dict] = []
                 ids: List[int] = []
                 for idx in range(len(page_chunks)):
                     extra = page_payloads[idx] if page_payloads and idx < len(page_payloads) else {}
-                    metadatas.append(extra)
+                    metadatas.append({**extra, "upload_time": now_str})
                     ids.append(start_index + idx)
                 vector_store.add_texts(texts=page_chunks, metadatas=metadatas, ids=ids)
                 start_index += len(page_chunks)
@@ -264,6 +269,7 @@ def ingest_document_to_qdrant(
                 current_article_meta = None
 
             if finished_chunks:
+                now_str = datetime.now().astimezone().isoformat(timespec='seconds')
                 # Deduplicate by article identity; keep the longest text per key
                 dedup_map: dict[tuple, tuple[str, dict]] = {}
                 order: List[tuple] = []
@@ -291,7 +297,7 @@ def ingest_document_to_qdrant(
                 metadatas: List[dict] = []
                 ids: List[int] = []
                 for idx in range(len(texts_out)):
-                    metadatas.append(metas_out[idx])
+                    metadatas.append({**metas_out[idx], "upload_time": now_str})
                     ids.append(start_index + idx)
                 vector_store.add_texts(texts=texts_out, metadatas=metadatas, ids=ids)
                 start_index += len(texts_out)
@@ -299,11 +305,12 @@ def ingest_document_to_qdrant(
         else:
             page_chunks = ["\n\n".join(prev_paras)]
             page_payloads = [{}]
+            now_str = datetime.now().astimezone().isoformat(timespec='seconds')
             metadatas: List[dict] = []
             ids: List[int] = []
             for idx in range(len(page_chunks)):
                 extra = page_payloads[idx] if page_payloads and idx < len(page_payloads) else {}
-                metadatas.append(extra)
+                metadatas.append({**extra, "upload_time": now_str})
                 ids.append(start_index + idx)
             vector_store.add_texts(texts=page_chunks, metadatas=metadatas, ids=ids)
             start_index += len(page_chunks)
